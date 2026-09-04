@@ -68,12 +68,16 @@ def run_dry_run(model, loss_fn, dataloader, device, use_amp: bool = True):
     pids = batch["pid"].to(device)
     
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
-    scaler = GradScaler(enabled=use_amp)
+    dev_type = "cuda" if device.type == "cuda" else "cpu"
+    try:
+        scaler = GradScaler(device=dev_type, enabled=use_amp)
+    except TypeError:
+        scaler = GradScaler(enabled=use_amp)
     
     start_time = time.time()
     optimizer.zero_grad()
     
-    with autocast(enabled=use_amp):
+    with autocast(device_type=dev_type, enabled=use_amp):
         rgb_feat, rgb_logits = model(rgb_imgs)
         ir_feat, ir_logits = model(ir_imgs)
         loss, _ = loss_fn(rgb_feat, rgb_logits, ir_feat, ir_logits, pids)
@@ -103,13 +107,14 @@ def train_epoch(model, loss_fn, train_loader, optimizer, scaler, scheduler, devi
     ce_loss_accum = 0.0
     triplet_loss_accum = 0.0
     
+    dev_type = "cuda" if device.type == "cuda" else "cpu"
     optimizer.zero_grad()
     for step, batch in enumerate(train_loader):
         rgb_imgs = batch["rgb"].to(device, non_blocking=True)
         ir_imgs = batch["ir"].to(device, non_blocking=True)
         pids = batch["pid"].to(device, non_blocking=True)
         
-        with autocast(enabled=use_amp):
+        with autocast(device_type=dev_type, enabled=use_amp):
             rgb_feat, rgb_logits = model(rgb_imgs)
             ir_feat, ir_logits = model(ir_imgs)
             loss, loss_components = loss_fn(rgb_feat, rgb_logits, ir_feat, ir_logits, pids)
@@ -228,7 +233,11 @@ def main():
         T_max=cfg["training"]["epochs"],
         eta_min=1e-6
     )
-    scaler = GradScaler(enabled=cfg["training"]["use_amp"])
+    dev_type = "cuda" if device.type == "cuda" else "cpu"
+    try:
+        scaler = GradScaler(device=dev_type, enabled=cfg["training"]["use_amp"])
+    except TypeError:
+        scaler = GradScaler(enabled=cfg["training"]["use_amp"])
 
     # Logger Setup
     logger = MetricLogger(log_dir=cfg["logging"]["save_dir"])
