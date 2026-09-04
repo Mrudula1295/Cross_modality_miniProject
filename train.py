@@ -5,8 +5,10 @@ import time
 import argparse
 import yaml
 import torch
-import torch.nn as nn
-from torch.cuda.amp import autocast, GradScaler
+try:
+    from torch.amp import autocast, GradScaler
+except ImportError:
+    from torch.cuda.amp import autocast, GradScaler
 
 from data.dataset import get_cross_modal_dataloaders
 from models.vit_reid import ViTCrossModalReID

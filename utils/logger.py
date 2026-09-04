@@ -1,7 +1,10 @@
 import os
 import csv
 import torch
-from torch.utils.tensorboard import SummaryWriter
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except Exception:
+    SummaryWriter = None
 
 
 def get_peak_vram_mb() -> float:
@@ -26,7 +29,7 @@ class MetricLogger:
         self.log_dir = log_dir
         os.makedirs(log_dir, exist_ok=True)
         
-        self.writer = SummaryWriter(log_dir=log_dir)
+        self.writer = SummaryWriter(log_dir=log_dir) if SummaryWriter is not None else None
         self.csv_path = os.path.join(log_dir, "metrics.csv")
         
         # Initialize CSV header if not present
@@ -38,22 +41,17 @@ class MetricLogger:
     def log_epoch(self, epoch: int, loss_dict: dict, metrics: dict = None):
         vram_mb = get_peak_vram_mb()
         
-        # Log to TensorBoard
-        for k, v in loss_dict.items():
-            self.writer.add_scalar(f"Loss/{k}", v, epoch)
-        self.writer.add_scalar("Hardware/Peak_VRAM_MB", vram_mb, epoch)
-        
-        r1, r5, r10, map_val = 0.0, 0.0, 0.0, 0.0
-        if metrics:
-            r1 = metrics.get("rank1", 0.0)
-            r5 = metrics.get("rank5", 0.0)
-            r10 = metrics.get("rank10", 0.0)
-            map_val = metrics.get("mAP", 0.0)
+        # Log to TensorBoard if available
+        if self.writer is not None:
+            for k, v in loss_dict.items():
+                self.writer.add_scalar(f"Loss/{k}", v, epoch)
+            self.writer.add_scalar("Hardware/Peak_VRAM_MB", vram_mb, epoch)
             
-            self.writer.add_scalar("Metrics/Rank1", r1, epoch)
-            self.writer.add_scalar("Metrics/Rank5", r5, epoch)
-            self.writer.add_scalar("Metrics/Rank10", r10, epoch)
-            self.writer.add_scalar("Metrics/mAP", map_val, epoch)
+            if metrics:
+                self.writer.add_scalar("Metrics/Rank1", metrics.get("rank1", 0.0), epoch)
+                self.writer.add_scalar("Metrics/Rank5", metrics.get("rank5", 0.0), epoch)
+                self.writer.add_scalar("Metrics/Rank10", metrics.get("rank10", 0.0), epoch)
+                self.writer.add_scalar("Metrics/mAP", metrics.get("mAP", 0.0), epoch)
 
         # Log to CSV file
         with open(self.csv_path, "a", newline="") as f:
