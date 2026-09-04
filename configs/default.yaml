@@ -1,0 +1,47 @@
+# Hardware & Memory Tuning (Optimized for RTX 4050 6GB VRAM, i7-14650HX)
+system:
+  device: "cuda" # 'cuda' or 'cpu'
+  num_workers: 4 # Windows compatible loader threads
+  pin_memory: true
+  persistent_workers: true
+
+# Dataset Configuration
+dataset:
+  name: "market1501_synthetic_ir"
+  root_dir: "./data_store"
+  img_height: 224
+  img_width: 224
+  clahe_clip: 2.0
+  clahe_grid: [8, 8]
+  colormap: "INFERNO" # cv2.COLORMAP_INFERNO
+
+# Model Architecture
+model:
+  backbone: "vit_small_patch16_224" # timm pretrained ViT for 6GB VRAM
+  embed_dim: 512 # Shared cross-modality embedding space
+  drop_rate: 0.1
+  grad_checkpointing: true # Gradient checkpointing to reduce peak VRAM
+
+# Training Parameters
+training:
+  batch_size: 16 # 16 RGB + 16 synthetic IR per batch
+  grad_accum_steps: 2 # Effective batch size = 32
+  epochs: 60
+  lr: 0.0003
+  weight_decay: 0.0001
+  warmup_epochs: 5
+  use_amp: true # Mixed precision training via torch.cuda.amp
+
+# Hybrid Loss Weights
+loss:
+  lambda_ce: 1.0
+  lambda_triplet: 1.0
+  margin: 0.3
+  label_smoothing: 0.1
+
+# Checkpointing & Logging
+logging:
+  save_dir: "./runs"
+  checkpoint_interval: 1
+  keep_last_n: 3
+  log_interval: 10
