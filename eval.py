@@ -15,8 +15,13 @@ def main():
     parser.add_argument("--config", type=str, default="./configs/default.yaml", help="Path to config yaml")
     args = parser.parse_args()
 
-    if not os.path.exists(args.weights):
-        print(f"[Error] Checkpoint weights not found at: {args.weights}")
+    weights_path = args.weights
+    colab_weights = "/content/drive/MyDrive/CrossModality_ReID/runs/best_model.pth"
+    if not os.path.exists(weights_path) and os.path.exists(colab_weights):
+        weights_path = colab_weights
+
+    if not os.path.exists(weights_path):
+        print(f"[Error] Checkpoint weights not found at: {weights_path}")
         print("Please train a model first using 'python train.py' or specify a valid checkpoint path via --weights.")
         return
 
@@ -24,8 +29,8 @@ def main():
         cfg = yaml.safe_load(f)
 
     device = torch.device(cfg["system"]["device"] if torch.cuda.is_available() else "cpu")
-    print(f"[Evaluation] Loading checkpoint: {args.weights}")
-    checkpoint = torch.load(args.weights, map_location=device)
+    print(f"[Evaluation] Loading checkpoint: {weights_path}")
+    checkpoint = torch.load(weights_path, map_location=device)
 
     # Prepare DataLoaders
     _, eval_loaders, num_classes = get_cross_modal_dataloaders(

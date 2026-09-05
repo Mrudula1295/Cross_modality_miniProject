@@ -1,5 +1,6 @@
 import os
 import sys
+import re
 import glob
 import time
 import argparse
@@ -38,6 +39,33 @@ def load_config(config_path: str = "./configs/default.yaml") -> dict:
         return yaml.safe_load(f)
 
 
+def find_latest_checkpoint(save_dir: str) -> tuple:
+    """
+    Finds the checkpoint with the highest epoch number in save_dir.
+    Returns tuple of (checkpoint_path, epoch_num).
+    """
+    if not os.path.exists(save_dir):
+        return None, 0
+    pattern = os.path.join(save_dir, "checkpoint_epoch_*.pth")
+    ckpts = glob.glob(pattern)
+    if not ckpts:
+        return None, 0
+    
+    latest_ckpt = None
+    max_epoch = -1
+    epoch_regex = re.compile(r"checkpoint_epoch_(\d+)\.pth")
+    
+    for ckpt in ckpts:
+        match = epoch_regex.search(os.path.basename(ckpt))
+        if match:
+            epoch = int(match.group(1))
+            if epoch > max_epoch:
+                max_epoch = epoch
+                latest_ckpt = ckpt
+                
+    return latest_ckpt, max_epoch
+
+
 def save_checkpoint(state: dict, save_dir: str, epoch: int, is_best: bool = False, keep_last_n: int = 3):
     os.makedirs(save_dir, exist_ok=True)
     ckpt_path = os.path.join(save_dir, f"checkpoint_epoch_{epoch}.pth")
@@ -51,10 +79,18 @@ def save_checkpoint(state: dict, save_dir: str, epoch: int, is_best: bool = Fals
 
     # Remove old checkpoints keeping only last N
     pattern = os.path.join(save_dir, "checkpoint_epoch_*.pth")
-    ckpts = sorted(glob.glob(pattern), key=os.path.getmtime)
+    
+    def extract_epoch(path):
+        m = re.search(r"checkpoint_epoch_(\d+)\.pth", os.path.basename(path))
+        return int(m.group(1)) if m else 0
+
+    ckpts = sorted(glob.glob(pattern), key=extract_epoch)
     if len(ckpts) > keep_last_n:
         for old_ckpt in ckpts[:-keep_last_n]:
-            os.remove(old_ckpt)
+            try:
+                os.remove(old_ckpt)
+            except OSError:
+                pass
 
 
 def run_dry_run(model, loss_fn, dataloader, device, use_amp: bool = True):
@@ -182,6 +218,8 @@ def main():
     parser = argparse.ArgumentParser(description="Cross-Modality Person Re-ID Training Entrypoint")
     parser.add_argument("--config", type=str, default="./configs/default.yaml", help="Path to config yaml")
     parser.add_argument("--dry-run", action="store_true", help="Probe VRAM consumption for 1 batch and exit")
+    parser.add_argument("--save-dir", type=str, default=None, help="Override checkpoint save directory")
+    parser.add_argument("--no-resume", action="store_true", help="Force starting fresh from epoch 1 ignoring existing checkpoints")
     args = parser.parse_args()
 
     print_warning_banner()
@@ -189,6 +227,19 @@ def main():
     
     device = torch.device(cfg["system"]["device"] if torch.cuda.is_available() else "cpu")
     print(f"[Device] Using device: {device} ({torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'})")
+
+    # Determine Save Directory (Colab Google Drive support vs Config vs CLI)
+    colab_drive_dir = "/content/drive/MyDrive/CrossModality_ReID/runs"
+    if args.save_dir:
+        save_dir = args.save_dir
+    elif os.path.exists("/content/drive/MyDrive/CrossModality_ReID"):
+        save_dir = colab_drive_dir
+        print(f"[Checkpoint] Google Drive detected. Using save directory: {save_dir}")
+    else:
+        save_dir = cfg["logging"].get("save_dir", "./runs")
+        
+    os.makedirs(save_dir, exist_ok=True)
+    print(f"[Checkpoint] Checkpoint directory ready: {save_dir}")
 
     # Automated Dataset Loading & Synthetic IR Generation
     train_loader, eval_loaders, num_classes = get_cross_modal_dataloaders(
@@ -239,12 +290,46 @@ def main():
     except TypeError:
         scaler = GradScaler(enabled=cfg["training"]["use_amp"])
 
-    # Logger Setup
-    logger = MetricLogger(log_dir=cfg["logging"]["save_dir"])
+    # Resume Checkpoint Logic
+    start_epoch = 1
     best_rank1 = 0.0
 
-    print("\n[Training Loop] Starting Cross-Modality Re-ID Training...")
-    for epoch in range(1, cfg["training"]["epochs"] + 1):
+    if not args.no_resume:
+        latest_ckpt_path, latest_epoch = find_latest_checkpoint(save_dir)
+        if latest_ckpt_path and os.path.exists(latest_ckpt_path):
+            print(f"[Checkpoint] Resuming from epoch {latest_epoch}")
+            checkpoint = torch.load(latest_ckpt_path, map_location=device)
+            
+            model.load_state_dict(checkpoint["model_state_dict"])
+            if "optimizer_state_dict" in checkpoint and optimizer is not None:
+                try:
+                    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+                except Exception as e:
+                    print(f"[Checkpoint] Warning: Could not load optimizer state: {e}")
+            if "scheduler_state_dict" in checkpoint and scheduler is not None:
+                try:
+                    scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+                except Exception as e:
+                    print(f"[Checkpoint] Warning: Could not load scheduler state: {e}")
+            if "scaler_state_dict" in checkpoint and scaler is not None and checkpoint.get("scaler_state_dict") is not None:
+                try:
+                    scaler.load_state_dict(checkpoint["scaler_state_dict"])
+                except Exception as e:
+                    print(f"[Checkpoint] Warning: Could not load scaler state: {e}")
+                    
+            start_epoch = checkpoint.get("epoch", latest_epoch) + 1
+            best_rank1 = checkpoint.get("best_rank1", 0.0)
+            print(f"[Checkpoint] Starting from epoch {start_epoch}")
+        else:
+            print(f"[Checkpoint] Starting from epoch 1")
+    else:
+        print("[Checkpoint] Starting fresh training from epoch 1 (--no-resume flag passed)")
+
+    # Logger Setup
+    logger = MetricLogger(log_dir=save_dir)
+
+    print(f"\n[Training Loop] Starting Cross-Modality Re-ID Training (Epochs {start_epoch} -> {cfg['training']['epochs']})...")
+    for epoch in range(start_epoch, cfg["training"]["epochs"] + 1):
         reset_vram_stats()
         loss_metrics = train_epoch(
             model=model,
@@ -284,10 +369,12 @@ def main():
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
+                "scaler_state_dict": scaler.state_dict() if scaler is not None else None,
                 "best_rank1": best_rank1,
                 "config": cfg
             },
-            save_dir=cfg["logging"]["save_dir"],
+            save_dir=save_dir,
             epoch=epoch,
             is_best=is_best,
             keep_last_n=cfg["logging"]["keep_last_n"]
