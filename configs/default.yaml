@@ -9,7 +9,7 @@ system:
 dataset:
   name: "sysu_mm01" # Options: "sysu_mm01" (Real RGB+IR) or "market1501_synthetic_ir" (Baseline)
   root_dir: "./data_store/sysu_mm01" # Path to SYSU-MM01 root (containing cam1..cam6 & exp/)
-  subset_size: 2000 # Identity-aware reproducible training subset size (~2000 images/pairs, null for full)
+  subset_size: null # Identity-aware reproducible training subset size (~2000 images/pairs, null for full)
   img_height: 224
   img_width: 224
   clahe_clip: 2.0
