@@ -18,19 +18,25 @@ from utils.metrics import evaluate_cross_modal
 from utils.logger import MetricLogger, get_peak_vram_mb, reset_vram_stats
 
 
-def print_warning_banner():
-    banner = """
+def print_dataset_banner(dataset_name: str = "sysu_mm01"):
+    if dataset_name == "sysu_mm01":
+        banner = """
     ================================================================================
-    [WARNING] SYNTHETIC INFRARED MODALITY IN USE
+    [INFO] REAL SYSU-MM01 RGB-INFRARED DATASET IN USE
     --------------------------------------------------------------------------------
-    This research project uses an automated synthetic infrared (IR) generator derived
-    from Market-1501 RGB images (Grayscale -> CLAHE -> INFERNO Colormap).
-    
-    This synthetic modality substitute stands in for real thermal camera data 
-    (SYSU-MM01 / RegDB) to validate the full cross-modality Re-ID pipeline 
-    end-to-end without requiring gated dataset access or manual logins.
+    Training with real multi-camera RGB (cam1, cam2, cam4, cam5) and 
+    real infrared thermal (cam3, cam6) images from SYSU-MM01.
     ================================================================================
-    """
+        """
+    else:
+        banner = """
+    ================================================================================
+    [WARNING] SYNTHETIC INFRARED MODALITY IN USE (BASELINE MODE)
+    --------------------------------------------------------------------------------
+    This baseline uses synthetic infrared (IR) generated from Market-1501 RGB images
+    (Grayscale -> CLAHE -> INFERNO Colormap).
+    ================================================================================
+        """
     print(banner)
 
 
@@ -222,8 +228,9 @@ def main():
     parser.add_argument("--no-resume", action="store_true", help="Force starting fresh from epoch 1 ignoring existing checkpoints")
     args = parser.parse_args()
 
-    print_warning_banner()
     cfg = load_config(args.config)
+    dataset_name = cfg["dataset"].get("name", "sysu_mm01")
+    print_dataset_banner(dataset_name)
     
     device = torch.device(cfg["system"]["device"] if torch.cuda.is_available() else "cpu")
     print(f"[Device] Using device: {device} ({torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU'})")
@@ -241,14 +248,19 @@ def main():
     os.makedirs(save_dir, exist_ok=True)
     print(f"[Checkpoint] Checkpoint directory ready: {save_dir}")
 
-    # Automated Dataset Loading & Synthetic IR Generation
+    # Automated Dataset Loading (REAL SYSU-MM01 or Synthetic Baseline)
+    dataset_name = cfg["dataset"].get("name", "sysu_mm01")
+    subset_size = cfg["dataset"].get("subset_size", 2000)
+
     train_loader, eval_loaders, num_classes = get_cross_modal_dataloaders(
-        root_dir=cfg["dataset"]["root_dir"],
+        root_dir=cfg["dataset"].get("root_dir"),
         batch_size=cfg["training"]["batch_size"],
         img_size=(cfg["dataset"]["img_height"], cfg["dataset"]["img_width"]),
         num_workers=cfg["system"]["num_workers"],
         pin_memory=cfg["system"]["pin_memory"],
-        persistent_workers=cfg["system"]["persistent_workers"]
+        persistent_workers=cfg["system"]["persistent_workers"],
+        dataset_name=dataset_name,
+        subset_size=subset_size
     )
     print(f"[Dataset] Train DataLoader ready ({len(train_loader.dataset)} image pairs, {num_classes} identities)")
 

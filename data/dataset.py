@@ -10,8 +10,9 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 
 from .synthesize_ir import synthesize_dataset, generate_synthetic_ir
+from .prepare_sysu_regdb import SYSUPrepare
 
-# Fallback download URLs & Google Drive IDs for Market-1501
+# Fallback download URLs & Google Drive IDs for Market-1501 baseline
 GDRIVE_FILE_IDS = [
     "0B8-rUzbwVRk0c054eEozWG9COHM",
     "0B8-BflA1ovbwd0hway13Y2EzZzA"
@@ -25,9 +26,8 @@ MARKET1501_FALLBACK_URLS = [
 
 class Market1501Manager:
     """
-    Automated dataset manager for Market-1501. Downloads the RGB dataset via torchreid, gdown,
+    Automated dataset manager for Market-1501 baseline. Downloads the RGB dataset via torchreid, gdown,
     or direct mirrors, and automatically triggers synthetic IR generation.
-    Includes offline synthetic fallback generator for guaranteed offline/CI compatibility.
     """
     def __init__(self, root_dir: str = "./data_store"):
         self.root_dir = os.path.abspath(root_dir)
@@ -37,7 +37,7 @@ class Market1501Manager:
         
     def acquire_dataset(self) -> tuple:
         """
-        Ensures both Market-1501 RGB and paired Synthetic-IR datasets are fully ready.
+        Ensures both Market-1501 RGB and paired Synthetic-IR datasets are ready.
         Returns tuple of (rgb_dataset_dir, synthetic_ir_dir).
         """
         os.makedirs(self.market_dir, exist_ok=True)
@@ -61,10 +61,9 @@ class Market1501Manager:
         return self.rgb_dataset_dir, self.synthetic_ir_dir
         
     def _download_market1501(self):
-        """Attempts torchreid download first, gdown Google Drive second, direct mirrors third, and offline fallback fourth."""
+        """Attempts torchreid download first, gdown Google Drive second, direct mirrors third."""
         download_success = False
         
-        # Method 1: torchreid automated downloader
         try:
             import torchreid
             print("[Dataset Manager] Attempting download via torchreid...")
@@ -74,7 +73,6 @@ class Market1501Manager:
         except Exception as e:
             print(f"[Dataset Manager] torchreid download notice: {e}")
             
-        # Method 2: gdown Google Drive file IDs
         if not download_success:
             try:
                 import gdown
@@ -91,7 +89,6 @@ class Market1501Manager:
             except Exception as e:
                 print(f"[Dataset Manager] gdown attempt notice: {e}")
 
-        # Method 3: Direct HTTP mirror URLs
         if not download_success:
             zip_path = os.path.join(self.market_dir, "Market-1501-v15.09.15.zip")
             for url in MARKET1501_FALLBACK_URLS:
@@ -111,34 +108,25 @@ class Market1501Manager:
                 except Exception as ex:
                     print(f"[Dataset Manager] Mirror download attempt failed ({url}): {ex}")
                     
-        # Method 4: Offline Synthetic Placeholder Dataset Generator (Guarantees zero manual work and 100% uptime)
         if not download_success or not os.path.exists(os.path.join(self.rgb_dataset_dir, "bounding_box_train")):
-            print("\n[Dataset Manager] Network downloads unavailable. Generating synthetic Market-1501 RGB dataset locally...")
+            print("\n[Dataset Manager] Generating synthetic Market-1501 RGB dataset locally for fallback...")
             self._create_synthetic_placeholder_rgb_dataset()
 
     def _create_synthetic_placeholder_rgb_dataset(self, num_identities: int = 20, images_per_id: int = 4):
-        """
-        Creates a synthetic RGB pedestrian dataset conforming to Market-1501 specifications.
-        Used as an offline fallback when dataset mirrors are unreachable.
-        """
         os.makedirs(self.rgb_dataset_dir, exist_ok=True)
         splits = ["bounding_box_train", "bounding_box_test", "query"]
         for s in splits:
             os.makedirs(os.path.join(self.rgb_dataset_dir, s), exist_ok=True)
             
-        print(f"[Dataset Manager] Generating {num_identities} synthetic identities for offline pipeline validation...")
         for pid in range(1, num_identities + 1):
             for img_idx in range(images_per_id):
-                camid = (img_idx % 6) + 1  # Cameras 1 to 6
+                camid = (img_idx % 6) + 1
                 filename = f"{pid:04d}_c{camid}s1_{img_idx:06d}_00.jpg"
-                
-                # Generate synthetic pedestrian-like RGB tensor image
                 img_np = np.zeros((128, 64, 3), dtype=np.uint8)
                 color = [int(c) for c in np.random.randint(50, 255, 3)]
                 img_np[:, :] = color
                 img_pil = Image.fromarray(img_np)
                 
-                # Distribute across train, test, and query splits
                 if pid <= num_identities // 2:
                     img_pil.save(os.path.join(self.rgb_dataset_dir, "bounding_box_train", filename))
                 else:
@@ -146,22 +134,16 @@ class Market1501Manager:
                         img_pil.save(os.path.join(self.rgb_dataset_dir, "query", filename))
                     else:
                         img_pil.save(os.path.join(self.rgb_dataset_dir, "bounding_box_test", filename))
-                        
-        print("[Dataset Manager] Synthetic Market-1501 RGB dataset generated successfully.")
 
 
 def parse_market1501_filename(filepath: str) -> tuple:
-    """
-    Parses PID (person ID) and CamID (camera ID) from Market-1501 filename pattern.
-    Example: 0001_c1s1_001051_00.jpg -> pid = 1, camid = 0
-    """
     filename = os.path.basename(filepath)
     pattern = re.compile(r"([-\d]+)_c(\d)")
     match = pattern.search(filename)
     if not match:
         return -1, -1
     pid, camid = map(int, match.groups())
-    return pid, camid - 1  # 0-indexed camera ID
+    return pid, camid - 1
 
 
 class BaseCrossModalDataset(Dataset):
@@ -271,98 +253,180 @@ def get_transforms(img_size=(224, 224)):
 
 
 def get_cross_modal_dataloaders(
-    root_dir: str = "./data_store",
+    root_dir: str = None,
     batch_size: int = 16,
     img_size=(224, 224),
     num_workers: int = 4,
     pin_memory: bool = True,
-    persistent_workers: bool = True
+    persistent_workers: bool = True,
+    dataset_name: str = "sysu_mm01",
+    subset_size: int = 2000
 ) -> tuple:
     """
-    Main loader interface that initializes datasets and returns PyTorch DataLoaders
-    for training and cross-modality evaluation.
+    Main loader interface initializing PyTorch DataLoaders for training and evaluation.
+    Supports REAL SYSU-MM01 dataset ("sysu_mm01") and Market-1501 synthetic baseline ("market1501_synthetic_ir").
     """
-    manager = Market1501Manager(root_dir=root_dir)
-    rgb_dir, ir_dir = manager.acquire_dataset()
-    
-    # Parse Training Data
-    train_rgb_files = sorted(glob.glob(os.path.join(rgb_dir, "bounding_box_train", "*.jpg")))
-    rgb_paths, ir_paths, pids, camids = [], [], [], []
-    
-    for rgb_path in train_rgb_files:
-        filename = os.path.basename(rgb_path)
-        pid, camid = parse_market1501_filename(filename)
-        # Exclude junk images (-1 and 0)
-        if pid <= 0:
-            continue
-        ir_path = os.path.join(ir_dir, "bounding_box_train", filename)
-        if os.path.exists(ir_path):
-            rgb_paths.append(rgb_path)
-            ir_paths.append(ir_path)
-            pids.append(pid)
-            camids.append(camid)
-            
     train_transform, val_transform = get_transforms(img_size)
-    
-    train_dataset = BaseCrossModalDataset(
-        rgb_image_paths=rgb_paths,
-        ir_image_paths=ir_paths,
-        pids=pids,
-        camids=camids,
-        transform=train_transform,
-        is_train=True
-    )
-    
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-        persistent_workers=persistent_workers if num_workers > 0 else False,
-        drop_last=True
-    )
-    
-    # Parse Evaluation Data (Query RGB & Gallery IR, and Query IR & Gallery RGB)
-    def parse_eval_split(split_name: str, base_dir: str):
-        split_files = sorted(glob.glob(os.path.join(base_dir, split_name, "*.jpg")))
-        paths, e_pids, e_cids = [], [], []
-        for p in split_files:
-            pid, camid = parse_market1501_filename(p)
+
+    if dataset_name == "sysu_mm01":
+        # Resolve SYSU-MM01 root directory (Explicit root_dir -> Colab Drive -> Colab local -> local fallback)
+        target_sysu_dir = None
+        if root_dir and os.path.exists(root_dir):
+            if any(os.path.exists(os.path.join(root_dir, c)) for c in ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6"]):
+                target_sysu_dir = root_dir
+        
+        if target_sysu_dir is None and not root_dir:
+            for p in ["/content/drive/MyDrive/SYSU-MM01", "/content/SYSU-MM01", "./data_store/sysu_mm01"]:
+                if os.path.exists(p) and any(os.path.exists(os.path.join(p, c)) for c in ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6"]):
+                    target_sysu_dir = p
+                    break
+
+        if target_sysu_dir is None:
+            sysu_path_err = root_dir if root_dir else "./data_store/sysu_mm01"
+            raise FileNotFoundError(
+                f"\n[ERROR] Real SYSU-MM01 dataset not found at: '{sysu_path_err}'\n"
+                "Please place SYSU-MM01 (containing cam1..cam6 & exp/) at './data_store/sysu_mm01' "
+                "or specify the correct path in configs/default.yaml under dataset.root_dir.\n"
+                "Refusing silent fallback to synthetic dataset when 'sysu_mm01' is configured."
+            )
+
+        # Parse Real SYSU-MM01 Dataset
+        sysu_prep = SYSUPrepare(sysu_dir=target_sysu_dir, subset_size=subset_size)
+        sysu_data = sysu_prep.parse_dataset()
+        
+        train_pairs = sysu_data["train_pairs"]
+        rgb_paths = [p[0] for p in train_pairs]
+        ir_paths = [p[1] for p in train_pairs]
+        pids = [p[2] for p in train_pairs]
+        camids = [p[3] for p in train_pairs]
+
+        train_dataset = BaseCrossModalDataset(
+            rgb_image_paths=rgb_paths,
+            ir_image_paths=ir_paths,
+            pids=pids,
+            camids=camids,
+            transform=train_transform,
+            is_train=True
+        )
+
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=persistent_workers if num_workers > 0 else False,
+            drop_last=True
+        )
+
+        # Test Data: Query IR (cam3,6) and Gallery RGB (cam1,2,4,5)
+        query_ir = sysu_data["query_ir"]
+        gallery_rgb = sysu_data["gallery_rgb"]
+
+        query_ir_paths = [q["path"] for q in query_ir]
+        query_ir_pids = [q["pid"] for q in query_ir]
+        query_ir_camids = [q["camid"] for q in query_ir]
+
+        gallery_rgb_paths = [g["path"] for g in gallery_rgb]
+        gallery_rgb_pids = [g["pid"] for g in gallery_rgb]
+        gallery_rgb_camids = [g["camid"] for g in gallery_rgb]
+
+        query_ir_loader = DataLoader(
+            EvaluationModalDataset(query_ir_paths, query_ir_pids, query_ir_camids, "ir", val_transform),
+            batch_size=batch_size * 2, shuffle=False, num_workers=num_workers, pin_memory=pin_memory
+        )
+        gallery_rgb_loader = DataLoader(
+            EvaluationModalDataset(gallery_rgb_paths, gallery_rgb_pids, gallery_rgb_camids, "rgb", val_transform),
+            batch_size=batch_size * 2, shuffle=False, num_workers=num_workers, pin_memory=pin_memory
+        )
+
+        eval_loaders = {
+            "ir_to_rgb": {"query": query_ir_loader, "gallery": gallery_rgb_loader},
+            "rgb_to_ir": {"query": gallery_rgb_loader, "gallery": query_ir_loader}
+        }
+
+        return train_loader, eval_loaders, train_dataset.num_classes
+
+    elif dataset_name == "market1501_synthetic_ir":
+        # Baseline Market-1501 + Synthetic IR loader
+        target_root = root_dir if root_dir else "./data_store"
+        manager = Market1501Manager(root_dir=target_root)
+        rgb_dir, ir_dir = manager.acquire_dataset()
+        
+        train_rgb_files = sorted(glob.glob(os.path.join(rgb_dir, "bounding_box_train", "*.jpg")))
+        rgb_paths, ir_paths, pids, camids = [], [], [], []
+        
+        for rgb_path in train_rgb_files:
+            filename = os.path.basename(rgb_path)
+            pid, camid = parse_market1501_filename(filename)
             if pid <= 0:
                 continue
-            paths.append(p)
-            e_pids.append(pid)
-            e_cids.append(camid)
-        return paths, e_pids, e_cids
+            ir_path = os.path.join(ir_dir, "bounding_box_train", filename)
+            if os.path.exists(ir_path):
+                rgb_paths.append(rgb_path)
+                ir_paths.append(ir_path)
+                pids.append(pid)
+                camids.append(camid)
+                
+        train_dataset = BaseCrossModalDataset(
+            rgb_image_paths=rgb_paths,
+            ir_image_paths=ir_paths,
+            pids=pids,
+            camids=camids,
+            transform=train_transform,
+            is_train=True
+        )
+        
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            persistent_workers=persistent_workers if num_workers > 0 else False,
+            drop_last=True
+        )
+        
+        def parse_eval_split(split_name: str, base_dir: str):
+            split_files = sorted(glob.glob(os.path.join(base_dir, split_name, "*.jpg")))
+            paths, e_pids, e_cids = [], [], []
+            for p in split_files:
+                pid, camid = parse_market1501_filename(p)
+                if pid <= 0:
+                    continue
+                paths.append(p)
+                e_pids.append(pid)
+                e_cids.append(camid)
+            return paths, e_pids, e_cids
 
-    query_rgb_paths, query_pids, query_camids = parse_eval_split("query", rgb_dir)
-    gallery_ir_paths, gallery_pids, gallery_camids = parse_eval_split("bounding_box_test", ir_dir)
-    
-    query_ir_paths, query_ir_pids, query_ir_camids = parse_eval_split("query", ir_dir)
-    gallery_rgb_paths, gallery_rgb_pids, gallery_rgb_camids = parse_eval_split("bounding_box_test", rgb_dir)
+        query_rgb_paths, query_pids, query_camids = parse_eval_split("query", rgb_dir)
+        gallery_ir_paths, gallery_pids, gallery_camids = parse_eval_split("bounding_box_test", ir_dir)
+        query_ir_paths, query_ir_pids, query_ir_camids = parse_eval_split("query", ir_dir)
+        gallery_rgb_paths, gallery_rgb_pids, gallery_rgb_camids = parse_eval_split("bounding_box_test", rgb_dir)
 
-    query_rgb_loader = DataLoader(
-        EvaluationModalDataset(query_rgb_paths, query_pids, query_camids, "rgb", val_transform),
-        batch_size=batch_size * 2, shuffle=False, num_workers=num_workers, pin_memory=pin_memory
-    )
-    gallery_ir_loader = DataLoader(
-        EvaluationModalDataset(gallery_ir_paths, gallery_pids, gallery_camids, "ir", val_transform),
-        batch_size=batch_size * 2, shuffle=False, num_workers=num_workers, pin_memory=pin_memory
-    )
-    
-    query_ir_loader = DataLoader(
-        EvaluationModalDataset(query_ir_paths, query_ir_pids, query_ir_camids, "ir", val_transform),
-        batch_size=batch_size * 2, shuffle=False, num_workers=num_workers, pin_memory=pin_memory
-    )
-    gallery_rgb_loader = DataLoader(
-        EvaluationModalDataset(gallery_rgb_paths, gallery_rgb_pids, gallery_rgb_camids, "rgb", val_transform),
-        batch_size=batch_size * 2, shuffle=False, num_workers=num_workers, pin_memory=pin_memory
-    )
+        query_rgb_loader = DataLoader(
+            EvaluationModalDataset(query_rgb_paths, query_pids, query_camids, "rgb", val_transform),
+            batch_size=batch_size * 2, shuffle=False, num_workers=num_workers, pin_memory=pin_memory
+        )
+        gallery_ir_loader = DataLoader(
+            EvaluationModalDataset(gallery_ir_paths, gallery_pids, gallery_camids, "ir", val_transform),
+            batch_size=batch_size * 2, shuffle=False, num_workers=num_workers, pin_memory=pin_memory
+        )
+        query_ir_loader = DataLoader(
+            EvaluationModalDataset(query_ir_paths, query_ir_pids, query_ir_camids, "ir", val_transform),
+            batch_size=batch_size * 2, shuffle=False, num_workers=num_workers, pin_memory=pin_memory
+        )
+        gallery_rgb_loader = DataLoader(
+            EvaluationModalDataset(gallery_rgb_paths, gallery_rgb_pids, gallery_rgb_camids, "rgb", val_transform),
+            batch_size=batch_size * 2, shuffle=False, num_workers=num_workers, pin_memory=pin_memory
+        )
 
-    eval_loaders = {
-        "rgb_to_ir": {"query": query_rgb_loader, "gallery": gallery_ir_loader},
-        "ir_to_rgb": {"query": query_ir_loader, "gallery": gallery_rgb_loader}
-    }
-    
-    return train_loader, eval_loaders, train_dataset.num_classes
+        eval_loaders = {
+            "rgb_to_ir": {"query": query_rgb_loader, "gallery": gallery_ir_loader},
+            "ir_to_rgb": {"query": query_ir_loader, "gallery": gallery_rgb_loader}
+        }
+        
+        return train_loader, eval_loaders, train_dataset.num_classes
+
+    else:
+        raise ValueError(f"Unknown dataset name '{dataset_name}'. Supported options: 'sysu_mm01', 'market1501_synthetic_ir'.")
